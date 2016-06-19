@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 var fs = require('fs');
+var neodoc = require('neodoc');
 var path = require('path');
 var mkdirp = require('mkdirp');
 var minimist = require('minimist');
@@ -12,25 +13,67 @@ var parseTime = require('parse-messy-time');
 var os = require('os');
 var tmpdir = (os.tmpdir || os.tmpDir)();
 
-var argv = minimist(process.argv.slice(2), {
-    alias: { m: 'message', v: 'verbose', a: 'archive', t: 'type' }
-});
+// assemble neodoc help-text from custom help-text format.
+var helpText = fs.readFileSync(
+    path.join(__dirname, '..', 'readme.markdown'), 'utf-8')
+        .match(/```usage([^`]*)```/mi)[1];
+var options = helpText.match(/(.*options:.*\n(^.+$\s)*)/mi)[0];
+var re = /(clocker ([a-z]+)?(.*))\n((^.+$\s)*)/gmi;
+var m, i = 0, entry, commands = {};
+while ((m = re.exec(helpText)) !== null) {
+    if (m.index === re.lastIndex) {
+        re.lastIndex++;
+    }
+    if (i === 0) {
+        entry = 'Usage: ' + m[1] + '\n\n' + options;
+    } else {
+        commands[m[1].split(' ')[1]] = (
+            'Usage: clocker '
+                + m[2] + ' [options] ' + m[3] + '\n\n'
+                + options);
+    }
+    i++;
+}
+
+var command;
+var args = neodoc.run(entry, { smartOptions: true, optionsFirst: true });
+
+if (args['--help']) {
+    console.log(helpText);
+    process.exit(0);
+}
+
+if (args['<command>']) {
+    if (!commands[args['<command>']]) {
+        console.error(entry);
+        console.error('Unknown command: ' + args['<command>']);
+        process.exit(1);
+    } else {
+        command = args['<command>'];
+        args = neodoc.run(commands[args['<command>']], {
+            smartOptions: true,
+            optionsFirst: true,
+            argv: [args['<command>']].concat(args['ARGS'])
+        });
+    }
+}
+
 var HOME = process.env.HOME || process.env.USERPROFILE;
-var datadir = argv.d || path.join(HOME, '.clocker');
+var datadir = args['--directory'] || path.join(HOME, '.clocker');
 mkdirp.sync(datadir);
 
 var db = level(path.join(datadir, 'db'), { valueEncoding: 'json' });
 
-if (argv.h) usage(0)
-else if (argv._[0] === 'start') {
-    var d = argv.date ? new Date(argv.date) : new Date;
-    var message = argv.message;
-    var type = argv.type;
+if (command === 'start') {
+    var d = args['--date'] ? new Date(args['--date']) : new Date;
+    var message = args['--message'];
+    var type = args['--type'];
     start(d, message, type, error);
 }
-else if (argv._[0] === 'stop') {
-    var d = argv.date ? new Date(argv.date) : new Date;
-    var k = argv.key || argv._[1];
+else if (command === 'stop') {
+    var d = args['--date'] ? new Date(args['--date']) : new Date;
+    var k = args['--key'] || args['KEY'];
+    console.log(args, k);
     if (k) {
         var key = getKey(k);
         db.get(key, function (err, value) {
@@ -45,7 +88,7 @@ else if (argv._[0] === 'stop') {
         }).once('data', onrowstop);
     }
     function onrowstop (row) {
-        var m = argv.message;
+        var m = argv['--message'];
         if (m) {
             if (row.value.message) m = row.value.message + '\n' + m;
             row.value.message = m;
@@ -54,8 +97,8 @@ else if (argv._[0] === 'stop') {
         db.put(row.key, row.value, error);
     }
 }
-else if (argv._[0] === 'restart') {
-    var k = argv.key || argv._[1];
+else if (command === 'restart') {
+    var k = args['--key'] || args['KEY'];
     if (k) {
         db.get(getKey(k), function (err, value) {
             if (err) error(err);
@@ -70,11 +113,11 @@ else if (argv._[0] === 'restart') {
         start(new Date, row.value.message, row.value.type, error);
     }
 }
-else if (argv._[0] === 'add' && argv._.length === 3) {
-    var start = strftime('%F %T', getDate(argv._[1]));
-    var end = strftime('%F %T', getDate(argv._[2]));
-    var message = argv.message;
-    var type = argv.type;
+else if (command === 'add') {
+    var start = strftime('%F %T', getDate(args['START']));
+    var end = strftime('%F %T', getDate(args['END']));
+    var message = argv['--message'];
+    var type = argv['--type'];
 
     var value = { type: type, message: message, end: end };
     var pkey = 'time!' + start;
@@ -85,7 +128,7 @@ else if (argv._[0] === 'add' && argv._.length === 3) {
         { type: 'put', key: tkey, value: 0 }
     ], error);
 }
-else if (argv._[0] === 'status') {
+else if (command === 'status') {
     var s = db.createReadStream({
         gt: 'time!', lt: 'time!~',
         limit: 1, reverse: true
@@ -102,19 +145,19 @@ else if (argv._[0] === 'status') {
         console.log(status);
     });
 }
-else if (argv._[0] === 'data') {
-    var type = argv.type || argv._[1];
+else if (command === 'data') {
+    var type = args['--type'] || args['TYPE'];
     var typeIsRegExp = isRegExp(type);
-    var rate = argv.rate || argv.r || argv._[2];
-    var title = argv.title || 'consulting';
+    var rate = args['--rate'] || args['RATE'];
+    var title = args['--title'] || 'consulting';
 
     var s = db.createReadStream({
-        gt: 'time!' + (argv.gt || ''),
-        lt: 'time!' + (argv.lt || '~')
+        gt: 'time!' + (args['--gt'] || ''),
+        lt: 'time!' + (args['--lt'] || '~')
     });
     var rows = [];
     var write = function (row) {
-        if (row.value.archive && !argv.archive) return;
+        if (row.value.archive && !args['--archive']) return;
         if (!type) return rows.push(row);
         if (row.value.type === type) return rows.push(row)
         if (typeIsRegExp && testRegExp(type, row.value.type)) return rows.push(row)
@@ -350,11 +393,8 @@ function edit (src, cb) {
 }
 
 function usage (code) {
-    var rs = fs.createReadStream(__dirname + '/usage.txt');
-    rs.pipe(process.stdout);
-    rs.on('close', function () {
-        if (code) process.exit(code);
-    });
+    console.log(helpText);
+    if (code) process.exit(code);
 }
 
 function pad (s, len) {
